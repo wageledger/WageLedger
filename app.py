@@ -67,24 +67,16 @@ from werkzeug.security import check_password_hash, generate_password_hash
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(BASE_DIR, "wage_ledger.db")
 STATIC_DIR = os.path.join(BASE_DIR, "static")
-SECRET_PATH = os.path.join(BASE_DIR, ".flask_secret")
 
 MODULES = ("employees", "attendance", "payslip", "reports")
 
 app = Flask(__name__, static_folder=STATIC_DIR, static_url_path="")
 
+app.secret_key = os.environ.get("FLASK_SECRET_KEY")
 
-def _load_or_create_secret():
-    if os.path.exists(SECRET_PATH):
-        with open(SECRET_PATH, "r") as f:
-            return f.read().strip()
-    key = secrets.token_hex(32)
-    with open(SECRET_PATH, "w") as f:
-        f.write(key)
-    return key
+if not app.secret_key:
+    raise RuntimeError("FLASK_SECRET_KEY is not set")
 
-
-app.secret_key = _load_or_create_secret()
 app.config.update(
     SESSION_COOKIE_HTTPONLY=True,
     SESSION_COOKIE_SAMESITE="Lax",
