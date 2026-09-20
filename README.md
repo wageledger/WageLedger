@@ -135,8 +135,12 @@ Flask `app` from `app.py` - no other build configuration is needed.
 
 ### 4. Set environment variables
 Project Settings -> Environment Variables:
-- `DATABASE_URL` - the Postgres connection string (auto-filled if you used
-  Vercel's own Storage integration in step 2).
+- `DATABASE_URL` - the Postgres connection string. If you used Vercel's own
+  Storage integration in step 2, it may add this under a different name
+  (`POSTGRES_URL`, `POSTGRES_PRISMA_URL`, `POSTGRES_URL_NON_POOLING`, or
+  `DATABASE_URL_UNPOOLED`) - the app checks all of these automatically, in
+  that order, so whichever one your integration set is picked up without
+  you needing to add `DATABASE_URL` separately.
 - `SECRET_KEY` - required whenever `DATABASE_URL` is set. Generate one with
   `python -c "import secrets; print(secrets.token_hex(32))"` and paste the
   result. Without this, Flask sessions (logins) would reset on every cold
@@ -146,9 +150,12 @@ Project Settings -> Environment Variables:
   `superadmin@123` default.
 
 ### 5. Deploy
-Click **Deploy**. On the very first request, `app.py` creates the Postgres
-tables and the default Super Admin login automatically - nothing to run by
-hand.
+Click **Deploy**. If you added or changed environment variables on an
+*existing* deployment rather than a fresh import, also trigger a redeploy
+(Deployments -> the three-dot menu on the latest one -> Redeploy) - Vercel
+does not apply new env vars to a build that already exists. On the very
+first request after that, `app.py` creates the Postgres tables and the
+default Super Admin login automatically - nothing to run by hand.
 
 ### 6. First login
 Sign in with the Super Admin credentials from step 4 (or the default),

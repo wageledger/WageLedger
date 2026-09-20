@@ -77,13 +77,29 @@ app = Flask(__name__, static_folder=STATIC_DIR, static_url_path="")
 # Database backend
 #
 # Local / any host with a writable disk: SQLite, unchanged, file on disk.
-# Vercel (or any serverless host with a read-only filesystem): set the
-# DATABASE_URL env var to a hosted Postgres connection string (Vercel
-# Postgres, Neon, Supabase, ...) and everything below switches over. The rest
+# Vercel (or any serverless host with a read-only filesystem): set a Postgres
+# connection string and everything below switches over. Different hosted-
+# Postgres integrations name this env var differently, so the first one set
+# wins - DATABASE_URL takes priority, but Vercel's own Postgres/Neon storage
+# integration is also recognised under whichever of these it used. The rest
 # of the file keeps using sqlite-style "?" placeholders and row["col"]
 # lookups either way - PGConn translates them.
 # ---------------------------------------------------------------------------
-DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
+_DB_URL_VARS = (
+    "DATABASE_URL",
+    "POSTGRES_URL",
+    "POSTGRES_PRISMA_URL",
+    "POSTGRES_URL_NON_POOLING",
+    "DATABASE_URL_UNPOOLED",
+)
+DATABASE_URL = ""
+_DB_URL_VAR_USED = ""
+for _v in _DB_URL_VARS:
+    _val = os.environ.get(_v, "").strip()
+    if _val:
+        DATABASE_URL = _val
+        _DB_URL_VAR_USED = _v
+        break
 IS_PG = bool(DATABASE_URL)
 
 if not IS_PG and os.environ.get("VERCEL"):
@@ -91,9 +107,11 @@ if not IS_PG and os.environ.get("VERCEL"):
     # filesystem is read-only, so SQLite (this app's default) cannot work
     # here - fail with a clear message instead of a confusing sqlite error.
     raise RuntimeError(
-        "DATABASE_URL is not set. On Vercel this app needs a hosted Postgres "
-        "database - add DATABASE_URL (and SECRET_KEY) under Project Settings "
-        "-> Environment Variables, then redeploy."
+        "No Postgres connection string is set (checked " + ", ".join(_DB_URL_VARS) + "). "
+        "On Vercel this app needs a hosted Postgres database - add DATABASE_URL "
+        "(and SECRET_KEY) under Project Settings -> Environment Variables for "
+        "the Production environment, then redeploy (adding an env var does not "
+        "restart an existing deployment by itself)."
     )
 
 if IS_PG:
