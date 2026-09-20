@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+wage_ledger.db
+.flask_secret
+.env
+venv/
+.venv/

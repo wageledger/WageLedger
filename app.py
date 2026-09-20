@@ -67,16 +67,89 @@ from werkzeug.security import check_password_hash, generate_password_hash
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(BASE_DIR, "wage_ledger.db")
 STATIC_DIR = os.path.join(BASE_DIR, "static")
+SECRET_PATH = os.path.join(BASE_DIR, ".flask_secret")
 
 MODULES = ("employees", "attendance", "payslip", "reports")
 
 app = Flask(__name__, static_folder=STATIC_DIR, static_url_path="")
 
-app.secret_key = os.environ.get("FLASK_SECRET_KEY")
+# ---------------------------------------------------------------------------
+# Database backend
+#
+# Local / any host with a writable disk: SQLite, unchanged, file on disk.
+# Vercel (or any serverless host with a read-only filesystem): set the
+# DATABASE_URL env var to a hosted Postgres connection string (Vercel
+# Postgres, Neon, Supabase, ...) and everything below switches over. The rest
+# of the file keeps using sqlite-style "?" placeholders and row["col"]
+# lookups either way - PGConn translates them.
+# ---------------------------------------------------------------------------
+DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
+IS_PG = bool(DATABASE_URL)
 
-if not app.secret_key:
-    raise RuntimeError("FLASK_SECRET_KEY is not set")
+if not IS_PG and os.environ.get("VERCEL"):
+    # Vercel sets this env var automatically on every deployment. Its
+    # filesystem is read-only, so SQLite (this app's default) cannot work
+    # here - fail with a clear message instead of a confusing sqlite error.
+    raise RuntimeError(
+        "DATABASE_URL is not set. On Vercel this app needs a hosted Postgres "
+        "database - add DATABASE_URL (and SECRET_KEY) under Project Settings "
+        "-> Environment Variables, then redeploy."
+    )
 
+if IS_PG:
+    import psycopg
+    from psycopg.rows import dict_row
+
+    if DATABASE_URL.startswith("postgres://"):
+        DATABASE_URL = "postgresql://" + DATABASE_URL[len("postgres://"):]
+
+    class PGConn:
+        """Wraps a psycopg connection so the rest of this file can keep
+        calling conn.execute(sql_with_question_marks, params).fetchone() /
+        .fetchall() exactly as it does for sqlite3."""
+
+        def __init__(self, raw):
+            self._raw = raw
+
+        def execute(self, sql, params=()):
+            had_ignore = "INSERT OR IGNORE INTO" in sql
+            pg_sql = sql.replace("INSERT OR IGNORE INTO", "INSERT INTO")
+            pg_sql = pg_sql.replace("?", "%s")
+            if had_ignore:
+                pg_sql = pg_sql.rstrip().rstrip(";") + " ON CONFLICT (user_id, main_id) DO NOTHING"
+            cur = self._raw.cursor(row_factory=dict_row)
+            cur.execute(pg_sql, params)
+            return cur
+
+        def commit(self):
+            self._raw.commit()
+
+        def close(self):
+            self._raw.close()
+
+
+def _load_or_create_secret():
+    env_secret = os.environ.get("SECRET_KEY", "").strip()
+    if env_secret:
+        return env_secret
+    if IS_PG:
+        # No writable disk to fall back to here (Vercel and similar), and
+        # without a fixed key every cold start would invalidate every
+        # session. Fail loudly instead of shipping broken logins.
+        raise RuntimeError(
+            "SECRET_KEY environment variable is required when DATABASE_URL is set. "
+            "Generate one with: python -c \"import secrets; print(secrets.token_hex(32))\""
+        )
+    if os.path.exists(SECRET_PATH):
+        with open(SECRET_PATH, "r") as f:
+            return f.read().strip()
+    key = secrets.token_hex(32)
+    with open(SECRET_PATH, "w") as f:
+        f.write(key)
+    return key
+
+
+app.secret_key = _load_or_create_secret()
 app.config.update(
     SESSION_COOKIE_HTTPONLY=True,
     SESSION_COOKIE_SAMESITE="Lax",
@@ -88,9 +161,12 @@ app.config.update(
 # ---------------------------------------------------------------------------
 def get_db():
     if "db" not in g:
-        g.db = sqlite3.connect(DB_PATH)
-        g.db.row_factory = sqlite3.Row
-        g.db.execute("PRAGMA foreign_keys = ON")
+        if IS_PG:
+            g.db = PGConn(psycopg.connect(DATABASE_URL))
+        else:
+            g.db = sqlite3.connect(DB_PATH)
+            g.db.row_factory = sqlite3.Row
+            g.db.execute("PRAGMA foreign_keys = ON")
     return g.db
 
 
@@ -106,6 +182,96 @@ def now_iso():
 
 
 def init_db():
+    if IS_PG:
+        _init_db_postgres()
+    else:
+        _init_db_sqlite()
+
+
+def _init_db_postgres():
+    """Fresh Postgres schema. No migration branches - unlike the long-lived
+    SQLite file, a hosted Postgres database here always starts empty, so it
+    can just get the final shape directly."""
+    conn = PGConn(psycopg.connect(DATABASE_URL))
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS kv_store (
+            key         TEXT PRIMARY KEY,
+            value       TEXT NOT NULL,
+            updated_at  TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS users (
+            id            BIGSERIAL PRIMARY KEY,
+            username      TEXT UNIQUE NOT NULL,
+            password_hash TEXT NOT NULL,
+            role          TEXT NOT NULL CHECK(role IN ('super_admin','admin','user')),
+            created_by    BIGINT,
+            active        INTEGER NOT NULL DEFAULT 1,
+            created_at    TEXT NOT NULL,
+            can_employees  INTEGER NOT NULL DEFAULT 1,
+            can_attendance INTEGER NOT NULL DEFAULT 1,
+            can_payslip    INTEGER NOT NULL DEFAULT 1,
+            can_reports    INTEGER NOT NULL DEFAULT 1
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS companies (
+            id         TEXT PRIMARY KEY,
+            name       TEXT NOT NULL DEFAULT '',
+            address    TEXT NOT NULL DEFAULT '',
+            is_main    INTEGER NOT NULL DEFAULT 0,
+            parent_id  TEXT,
+            owner_id   BIGINT,
+            created_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS user_mains (
+            user_id BIGINT NOT NULL,
+            main_id TEXT NOT NULL,
+            UNIQUE(user_id, main_id)
+        )
+        """
+    )
+    conn.commit()
+
+    row = conn.execute("SELECT id FROM companies WHERE is_main=1").fetchone()
+    if row is None:
+        conn.execute(
+            "INSERT INTO companies (id,name,address,is_main,parent_id,owner_id,created_at) "
+            "VALUES ('main','Main Company','',1,NULL,NULL,?)",
+            (now_iso(),),
+        )
+        conn.commit()
+
+    row = conn.execute("SELECT id FROM users WHERE role='super_admin'").fetchone()
+    if row is None:
+        default_user = os.environ.get("SUPERADMIN_USERNAME", "superadmin")
+        default_pass = os.environ.get("SUPERADMIN_PASSWORD", "superadmin@123")
+        conn.execute(
+            "INSERT INTO users (username,password_hash,role,created_by,active,created_at) VALUES (?,?,?,?,1,?)",
+            (default_user, generate_password_hash(default_pass), "super_admin", None, now_iso()),
+        )
+        conn.commit()
+        print("=" * 64)
+        print(" First run: created default Super Admin login")
+        print(f"   Username: {default_user}")
+        print(f"   Password: {default_pass}")
+        print(" This is a fixed default password - change it immediately")
+        print(" after your first login, especially before/after deploying.")
+        print("=" * 64)
+    conn.close()
+
+
+def _init_db_sqlite():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     conn.execute(
@@ -886,6 +1052,11 @@ def index():
     return send_from_directory(STATIC_DIR, "index.html")
 
 
+# Runs at import time too (not just under __main__), so a serverless entry
+# point that only ever imports this module - Vercel's api/index.py, for
+# instance - still gets the schema created and the bootstrap super admin
+# added on cold start.
+init_db()
+
 if __name__ == "__main__":
-    init_db()
     app.run(host="0.0.0.0", port=5000, debug=True)
