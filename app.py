@@ -65,7 +65,7 @@ from flask import Flask, g, jsonify, request, send_from_directory, session
 from werkzeug.security import check_password_hash, generate_password_hash
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DB_PATH = "/tmp/wage_ledger.db"
+DB_PATH = os.path.join(BASE_DIR, "wage_ledger.db")
 STATIC_DIR = os.path.join(BASE_DIR, "static")
 
 MODULES = ("employees", "attendance", "payslip", "reports")
