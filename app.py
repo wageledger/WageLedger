@@ -65,7 +65,7 @@ from flask import Flask, g, jsonify, request, send_from_directory, session
 from werkzeug.security import check_password_hash, generate_password_hash
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DB_PATH = os.path.join(BASE_DIR, "wage_ledger.db")
+DB_PATH = "/tmp/wage_ledger.db"
 STATIC_DIR = os.path.join(BASE_DIR, "static")
 
 MODULES = ("employees", "attendance", "payslip", "reports")
@@ -1051,3 +1051,6 @@ def index():
 if __name__ == "__main__":
     init_db()
     app.run(host="0.0.0.0", port=5000, debug=True)
+
+if not os.path.exists(DB_PATH):
+    init_db()
