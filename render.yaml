@@ -1,0 +1,31 @@
+# Render Blueprint — deploy with "New +" -> "Blueprint" and point it at this
+# repo, or run `render blueprint launch`. Creates one web service with a
+# persistent disk mounted at /var/data, where the SQLite database and the
+# session-secret file live (survives restarts and redeploys).
+#
+# The free plan works to try it out, but free web services spin down after
+# 15 minutes idle AND do not support persistent disks — use the starter
+# plan (or above) for a payroll tool people rely on, so data isn't lost on
+# every spin-down.
+services:
+  - type: web
+    name: wage-ledger
+    runtime: python
+    plan: starter
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn app:app --bind 0.0.0.0:$PORT --workers 1 --threads 4 --timeout 60
+    envVars:
+      - key: DATA_DIR
+        value: /var/data
+      - key: SECRET_KEY
+        generateValue: true
+      - key: SESSION_COOKIE_SECURE
+        value: "1"
+      - key: SUPERADMIN_USERNAME
+        value: superadmin
+      - key: SUPERADMIN_PASSWORD
+        generateValue: true
+    disk:
+      name: wage-ledger-data
+      mountPath: /var/data
+      sizeGB: 1
